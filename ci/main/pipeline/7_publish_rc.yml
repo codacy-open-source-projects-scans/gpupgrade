@@ -1,0 +1,62 @@
+- name: publish-release-candidate
+  plan:
+    - in_parallel:
+        - get: gpupgrade_src
+          trigger: true
+          passed:
+            - build
+            - unit-and-integration-tests
+            {{- range .AcceptanceJobs}}
+            - {{ .Name }}
+            {{- end}}
+            {{- range .PgupgradeJobs}}
+            - {{.Name}}
+            {{- end}}
+            {{- range .UpgradeJobs}}
+            - {{ .Name }}
+            {{- end}}
+            {{- range .MultihostAcceptanceJobs}}
+            - {{ .Name }}
+            {{- end}}
+        - get: enterprise_rpm
+          passed:
+            - build
+            {{- range .UpgradeJobs}}
+            - {{ .Name }}
+            {{- end}}
+            {{- range .PgupgradeJobs}}
+            - {{.Name}}
+            {{- end}}
+            {{- range .MultihostAcceptanceJobs}}
+            - {{ .Name }}
+            {{- end}}
+        - get: oss_rpm
+          passed:
+            - build
+    - task: add-semver
+      config:
+        platform: linux
+        image_resource:
+          type: registry-image
+          source:
+            repository: golang
+            tag: 1.16
+        inputs:
+          - name: gpupgrade_src
+          - name: oss_rpm
+          - name: enterprise_rpm
+        outputs:
+          - name: renamed_oss_rpm
+          - name: renamed_enterprise_rpm
+        run:
+          path: gpupgrade_src/ci/main/scripts/add-semver.bash
+    - in_parallel:
+        - put: oss_rc_rpm
+          params:
+            file: renamed_oss_rpm/gpupgrade-*.rpm
+        - put: enterprise_rc_rpm
+          params:
+            file: renamed_enterprise_rpm/gpupgrade-*.rpm
+  on_failure:
+    do:
+      - <<: *slack_alert

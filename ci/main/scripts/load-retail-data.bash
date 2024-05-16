@@ -1,0 +1,136 @@
+#!/bin/bash
+# Copyright (c) 2017-2023 VMware, Inc. or its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+set -eux -o pipefail
+
+source gpupgrade_src/ci/main/scripts/environment.bash
+./ccp_src/scripts/setup_ssh_to_cluster.sh
+
+# Cache our list of hosts to loop over below.
+mapfile -t hosts < cluster_env_files/hostfile_all
+
+# Copy binaries to test runner container to help compile bm.so
+scp -qr cdw:${GPHOME_SOURCE} ${GPHOME_SOURCE}
+scp -qr cdw:${GPHOME_TARGET} ${GPHOME_TARGET}
+
+pushd retail_demo_src/box_muller/
+  # make bm.so for source cluster
+  make PG_CONFIG=${GPHOME_SOURCE}/bin/pg_config clean all
+
+  # Install bm.so onto the segments
+  for host in "${hosts[@]}"; do
+      scp bm.so $host:/tmp
+      ssh centos@$host "sudo mv /tmp/bm.so ${GPHOME_SOURCE}/lib/postgresql/bm.so"
+  done
+
+  # make bm.so for target cluster
+  make PG_CONFIG=${GPHOME_TARGET}/bin/pg_config clean all
+
+  # Install bm.so onto the segments for target cluster
+  for host in "${hosts[@]}"; do
+      scp bm.so $host:/tmp
+      ssh centos@$host "sudo mv /tmp/bm.so ${GPHOME_TARGET}/lib/postgresql/bm.so"
+  done
+popd
+
+# extract demo_data for both cdw and segments
+pushd retail_demo_src
+    tar xf demo_data.tar.xz
+
+    pushd demo_data
+        # decimate key data files to speed things up
+        for f in male_first_names.txt female_first_names.txt products_full.dat surnames.dat; do
+            awk 'NR % 10 == 0' "$f" > tmp.txt
+            mv tmp.txt "$f"
+        done
+    popd
+popd
+
+# copy extracted demo_data and retail_demo_src to cdw
+scp -qr retail_demo_src cdw:/home/gpadmin/industry_demo/
+
+# create database and tables
+ssh cdw <<EOF
+    set -x
+
+    source ${GPHOME_SOURCE}/greenplum_path.sh
+    cd /home/gpadmin/industry_demo
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d template1 -e -f data_generation/prep_database.sql
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/prep_external_tables.sql
+EOF
+
+# copy extracted demo_data to segments and start gpfdist
+for host in "${hosts[@]}"; do
+    scp -qr retail_demo_src/demo_data/ $host:/data/
+
+    ssh -n $host "
+        set -eux -o pipefail
+
+        source ${GPHOME_SOURCE}/greenplum_path.sh
+        gpfdist -d /data/demo_data -p 8081 -l /data/demo_data/gpfdist.8081.log &
+        gpfdist -d /data/demo_data -p 8082 -l /data/demo_data/gpfdist.8082.log &
+    "
+done
+
+# prepare and generate data
+time ssh cdw <<EOF
+    set -eux -o pipefail
+
+    source ${GPHOME_SOURCE}/greenplum_path.sh
+    export PGPORT=${PGPORT}
+    export MASTER_DATA_DIRECTORY=/data/gpdata/coordinator/gpseg-1
+
+    # Why do we need to restart in order to have the bm.so extension take affect?
+    gpstop -ar
+
+    cd /home/gpadmin/industry_demo
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/prep_UDFs.sql
+
+    data_generation/prep_GUCs.sh
+
+    # prepare data
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/prep_retail_xts_tables.sql
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/prep_dimensions.sql
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/prep_facts.sql
+
+    # generate data
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/gen_order_base.sql
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/gen_facts.sql
+    # gen_load_files.sql is trying to query table that doesn't exist. Disabled
+    # ON_ERROR_STOP until we can look into why this is the case.
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=0 -d gpdb_demo -e -f data_generation/gen_load_files.sql
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/load_RFMT_Scores.sql
+
+    # verify data
+    # TODO: assert on the output of verification script
+    PGOPTIONS='--client-min-messages=warning' psql -v ON_ERROR_STOP=1 --quiet -d gpdb_demo -e -f data_generation/verify_data.sql
+
+    # XXX: This is a workaround for the following pg_upgrade check failure:
+    # "ERROR: could not create relation
+    # file 'base/16384/17214', relation name 'info_rels': File exists"
+    gpstop -ar
+EOF
+
+# perform upgrade fixups:
+ssh cdw "
+    set -eux -o pipefail
+
+    source ${GPHOME_SOURCE}/greenplum_path.sh
+    export MASTER_DATA_DIRECTORY=/data/gpdata/coordinator/gpseg-1
+
+    gpupgrade generate --non-interactive --gphome "$GPHOME_SOURCE" --port "$PGPORT" --output-dir /home/gpadmin/gpupgrade
+    gpupgrade apply    --non-interactive --gphome "$GPHOME_SOURCE" --port "$PGPORT" --input-dir /home/gpadmin/gpupgrade --phase initialize
+
+    # match root/child partition schemas
+    psql -v ON_ERROR_STOP=1 -d gpdb_demo <<SQL_EOF
+        ALTER TABLE retail_demo.order_lineitems SET SCHEMA retail_parts;
+        ALTER TABLE retail_demo.shipment_lineitems SET SCHEMA retail_parts;
+        ALTER TABLE retail_demo.orders SET SCHEMA retail_parts;
+SQL_EOF
+
+    # XXX: This is a workaround for the following pg_upgrade check failure:
+    # ERROR: could not create relation
+    # file 'base/16384/17214', relation name 'info_rels': File exists
+    gpcheckcat -p $PGPORT gpdb_demo
+"
