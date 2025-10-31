@@ -1,0 +1,66 @@
+// Copyright (c) 2017-2023 VMware, Inc. or its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package agent
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"github.com/greenplum-db/gpupgrade/idl"
+	"github.com/greenplum-db/gpupgrade/utils/errorlist"
+)
+
+func (s *Server) RenameTablespaces(ctx context.Context, req *idl.RenameTablespacesRequest) (*idl.RenameTablespacesReply, error) {
+	log.Print("starting rename tablespaces")
+
+	err := renameTablespaces(req.GetRenamePairs())
+	if err != nil {
+		return &idl.RenameTablespacesReply{}, err
+	}
+
+	return &idl.RenameTablespacesReply{}, nil
+}
+
+func renameTablespaces(pairs []*idl.RenameTablespacesRequest_RenamePair) error {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return err
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(pairs)*2)
+
+	for _, pair := range pairs {
+		wg.Add(1)
+
+		go func(pair *idl.RenameTablespacesRequest_RenamePair) {
+			defer wg.Done()
+
+			log.Printf("mkdirAll: %q", filepath.Dir(pair.GetDestination()))
+			err := os.MkdirAll(filepath.Dir(pair.GetDestination()), 0700)
+			if err != nil {
+				errs <- fmt.Errorf("on host %q: %w", hostname, err)
+			}
+
+			log.Printf("rename: %q to %q", pair.GetSource(), pair.GetDestination())
+			err = os.Rename(pair.GetSource(), pair.GetDestination())
+			if err != nil {
+				errs <- fmt.Errorf("on host %q: %w", hostname, err)
+			}
+		}(pair)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for e := range errs {
+		err = errorlist.Append(err, e)
+	}
+
+	return err
+}

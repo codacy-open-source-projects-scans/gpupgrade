@@ -1,0 +1,201 @@
+// Copyright (c) 2017-2023 VMware, Inc. or its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+package idl;
+option go_package = "github.com/greenplum-db/gpupgrade/idl";
+import "common.proto";
+
+service Agent {
+  rpc CreateBackupDirectory (CreateBackupDirectoryRequest) returns (CreateBackupDirectoryReply) {}
+  rpc CheckDiskSpace (CheckSegmentDiskSpaceRequest) returns (CheckDiskSpaceReply) {}
+  rpc UpgradePrimaries (UpgradePrimariesRequest) returns (UpgradePrimariesReply) {}
+  rpc RenameDirectories (RenameDirectoriesRequest) returns (RenameDirectoriesReply) {}
+  rpc StopAgent (StopAgentRequest) returns (StopAgentReply) {}
+  rpc DeleteDataDirectories (DeleteDataDirectoriesRequest) returns (DeleteDataDirectoriesReply) {}
+  rpc DeleteBackupDirectory (DeleteBackupDirectoryRequest) returns (DeleteBackupDirectoryReply) {}
+  rpc DeleteStateDirectory (DeleteStateDirectoryRequest) returns (DeleteStateDirectoryReply) {}
+  rpc DeleteTablespaceDirectories (DeleteTablespaceRequest) returns (DeleteTablespaceReply) {}
+  rpc ArchiveLogDirectory (ArchiveLogDirectoryRequest) returns (ArchiveLogDirectoryReply) {}
+  rpc RsyncDataDirectories (RsyncRequest) returns (RsyncReply) {}
+  rpc RsyncTablespaceDirectories (RsyncRequest) returns (RsyncReply) {}
+  rpc RestorePrimariesPgControl (RestorePgControlRequest) returns (RestorePgControlReply) {}
+  rpc UpdateConfiguration (UpdateConfigurationRequest) returns (UpdateConfigurationReply) {}
+  rpc RenameTablespaces (RenameTablespacesRequest) returns (RenameTablespacesReply) {}
+  rpc CreateRecoveryConf (CreateRecoveryConfRequest) returns (CreateRecoveryConfReply) {}
+  rpc AddReplicationEntries (AddReplicationEntriesRequest) returns (AddReplicationEntriesReply) {}
+}
+
+message PgOptions {
+  enum PgUpgradeMode {
+    unknown_pgUpgradeMode = 0; // http://androiddevblog.com/protocol-buffers-pitfall-adding-enum-values/
+    dispatcher = 1;
+    segment = 2;
+  }
+
+  enum Action {
+    unknown_action = 0; // http://androiddevblog.com/protocol-buffers-pitfall-adding-enum-values/
+    upgrade = 1;
+    check = 2;
+  }
+
+  string backupDir = 1;
+  bool pgUpgradeVerbose = 2;
+  bool skipPgUpgradeChecks = 3;
+  string pgUpgradeJobs = 4;
+  Action action = 5;
+  string role = 6;
+  int32 contentID = 7;
+  PgUpgradeMode pgUpgradeMode = 8;
+  string oldOptions = 9;
+  Mode mode = 10;
+  string targetVersion = 11;
+  string oldBinDir = 12;
+  string oldDataDir = 13;
+  string oldPort = 14;
+  string oldDBID = 15;
+  string newBinDir = 16;
+  string newDataDir = 17;
+  string newPort = 18;
+  string newDBID = 19;
+  map<int32, TablespaceInfo> Tablespaces = 20;
+  string pgUpgradeTimeStamp = 21;
+}
+
+message TablespaceInfo {
+  string Location = 1;
+  bool UserDefined = 2;
+}
+
+message UpgradePrimariesRequest {
+  PgOptions.Action action = 1;
+  repeated PgOptions opts = 2;
+}
+
+message UpgradePrimariesReply {}
+
+message CreateBackupDirectoryRequest {
+  string backupDir = 1;
+}
+message CreateBackupDirectoryReply {}
+
+message DeleteDataDirectoriesRequest {
+  repeated string datadirs = 1;
+}
+message DeleteDataDirectoriesReply {}
+
+message DeleteStateDirectoryRequest {}
+message DeleteStateDirectoryReply {}
+
+message DeleteBackupDirectoryRequest {
+  string backupDir = 1;
+}
+message DeleteBackupDirectoryReply {}
+
+message DeleteTablespaceRequest {
+  repeated string dirs = 1;
+}
+message DeleteTablespaceReply {}
+
+message ArchiveLogDirectoryRequest {
+  string logArchiveDir = 1;
+}
+message ArchiveLogDirectoryReply {}
+
+message RenameDirectories {
+  string Source = 1;
+  string Target = 2;
+}
+
+message RenameDirectoriesRequest {
+  repeated RenameDirectories Dirs = 1;
+}
+
+message RenameDirectoriesReply {}
+
+message StopAgentRequest {}
+message StopAgentReply {}
+
+message CheckSegmentDiskSpaceRequest {
+  double diskFreeRatio = 1;
+  repeated string dirs = 2;
+}
+
+message CheckDiskSpaceReply {
+  message DiskUsage {
+    string fs = 1;
+    string host = 2;
+    uint64 available = 3;
+    uint64 required = 4;
+  }
+
+  repeated DiskUsage usages = 1;
+}
+
+message RsyncRequest {
+  message RsyncOptions {
+    repeated string sources = 1;
+    string destinationHost = 2;
+    string destination = 3;
+    repeated string options = 4;
+    repeated string excludedFiles = 5;
+  }
+
+  repeated RsyncOptions options = 1;
+}
+
+message RsyncReply {}
+
+message RestorePgControlRequest {
+  repeated string datadirs = 1;
+}
+
+message RestorePgControlReply {}
+
+message UpdateFileConfOptions {
+  string path = 1;
+  string pattern = 2;
+  string replacement = 3;
+}
+
+message UpdateConfigurationRequest {
+  repeated UpdateFileConfOptions options = 1;
+}
+
+message UpdateConfigurationReply {}
+
+message RenameTablespacesRequest {
+  message RenamePair {
+    string source = 1;
+    string destination = 2;
+  }
+
+  repeated RenamePair renamePairs = 1;
+}
+
+message RenameTablespacesReply{}
+
+message CreateRecoveryConfRequest {
+  message Connection {
+    string mirrorDataDir = 2;
+    string user = 1;
+    string primaryHost = 3;
+    int32 primaryPort = 4;
+  }
+
+  repeated Connection connections = 1;
+}
+
+message CreateRecoveryConfReply{}
+
+message AddReplicationEntriesRequest {
+  message Entry {
+    string DataDir = 1;
+    string User = 2;
+    repeated string HostAddrs = 3;
+  }
+
+  repeated Entry entries = 1;
+}
+
+message AddReplicationEntriesReply {}
